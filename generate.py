@@ -34,9 +34,10 @@ def process_single_ticket(index, row):
     elif not log_notes:
         log_notes = "Not provided."
 
+    # ENHANCED PROMPT: Tailored to capture root causes, workarounds, and actions taken
     prompt = f"""
-System: You are a strict data-extraction assistant summarizing helpdesk tickets.
-Rely ONLY on the provided text. Do not assume, extrapolate, or invent details.
+System: You are an expert IT service desk analyst creating articles for a technical Knowledge Base.
+Analyze the provided ticket context carefully to extract the category, problem summary, and how it was handled.
 
 ### Ticket Context:
 Ticket Name: {ticket_name}
@@ -44,9 +45,12 @@ Description: {description}
 Log Notes: {log_notes}
 
 ### Strict Guidelines:
-1. "category": Exactly 1 to 2 words identifying the component (e.g., Database, License, Server, Training).
-2. "summary": Capture the exact technical problem or request in 1-2 sentences. 
-3. "resolution": Use ONLY facts from the Log Notes or Description. If unstated or not provided, use "No explicit resolution found in ticket logs."
+1. "category": Exactly 1 to 2 words identifying the component or system (e.g., Server, Database, Infrastructure, Network, License).
+2. "summary": A clear 1-2 sentence description explaining the exact technical fault, error message, or user request.
+3. "resolution": Summarize the actions taken to fix the issue, the root cause identified, or the advice/workaround provided to the customer as found in the Log Notes or Description. 
+   - Be specific (e.g., mention specific errors, IP conflicts, or steps taken if present).
+   - If the log notes state that a fix was verified, or if troubleshooting details are present, synthesize them into a concise resolution statement.
+   - ONLY use "No explicit resolution found in ticket logs" if the text is completely blank or offers zero context on what happened.
 
 Output strictly in JSON format matching this schema:
 {{
@@ -62,7 +66,7 @@ Output strictly in JSON format matching this schema:
         "stream": False,
         "format": "json",
         "options": {
-            "temperature": 0.0
+            "temperature": 0.1 # Bumped slightly from 0.0 to enable logical synthesis of log records
         }
     }
 
@@ -145,4 +149,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
