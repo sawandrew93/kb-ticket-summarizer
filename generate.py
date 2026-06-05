@@ -5,10 +5,18 @@ import re
 import time
 import argparse
 import os
+import certifi  # Ensures secure, trusted SSL connection
+import os
+from dotenv import load_dotenv
+
+# Load variables from .env file
+load_dotenv()
+
 
 # --- CONFIGURATION ---
-OLLAMA_API = "http://127.0.0.1:11434/api/generate"
-MODEL = "llama3.1"
+OLLAMA_API = os.getenv("OLLAMA_API")
+API_KEY = os.getenv("API_KEY")
+MODEL = os.getenv("MODEL")
 TIMEOUT_SECONDS = 180
 MAX_RETRIES = 3
 
@@ -19,7 +27,7 @@ def clean_input_text(text):
     text = re.sub(r'\s+', ' ', text)
     return text.strip()
 
-def process_single_ticket(index, row):
+def process_single_ticket(index, row, session):
     ticket_number = clean_input_text(row.get('Ticket Number', f'TKT-{index}'))
     ticket_name = clean_input_text(row.get('Ticket Name', ''))
     description = clean_input_text(row.get('Description', ''))
@@ -46,7 +54,6 @@ Log Notes: {log_notes}
 
 ### Strict Guidelines:
 1. "category": MUST be chosen ONLY from the following predefined list:
-
    - Finance
    - Sales
    - Purchasing
@@ -97,9 +104,15 @@ Output strictly in JSON format matching this schema:
         }
     }
 
+    headers = {
+        "X-API-Key": API_KEY,
+        "Content-Type": "application/json"
+    }
+
     for attempt in range(MAX_RETRIES):
         try:
-            response = requests.post(OLLAMA_API, json=payload, timeout=TIMEOUT_SECONDS)
+            # Reusing the session connection here dramatically speeds up sequential requests
+            response = session.post(OLLAMA_API, json=payload, headers=headers, timeout=TIMEOUT_SECONDS)
             response.raise_for_status()
             raw_output = response.json().get('response', '').strip()
 
@@ -159,13 +172,18 @@ def main():
     results = []
     total_tickets = len(df)
 
-    print(f"Starting sequential processing for {total_tickets} tickets using local Ollama...")
+    print(f"Starting optimized sequential processing for {total_tickets} tickets over HTTPS...")
 
-    for index, row in df.iterrows():
-        print(f"Processing ticket {index + 1} of {total_tickets}...")
-        res = process_single_ticket(index, row)
-        if res:
-            results.append(res)
+    # Establish an HTTP session context manager to keep the connection alive
+    with requests.Session() as session:
+        # Enforce SSL validation globally across the session using certifi
+        session.verify = certifi.where()
+
+        for index, row in df.iterrows():
+            print(f"Processing ticket {index + 1} of {total_tickets}...")
+            res = process_single_ticket(index, row, session)
+            if res:
+                results.append(res)
 
     if results:
         output_df = pd.DataFrame(results)
@@ -176,4 +194,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
