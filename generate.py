@@ -34,7 +34,7 @@ def process_single_ticket(index, row):
     elif not log_notes:
         log_notes = "Not provided."
 
-    # ENHANCED PROMPT: Categories restricted to SAP B1 and S/4HANA Public Cloud
+    # ENHANCED PROMPT: Categories restricted to approved list
     prompt = f"""
 System: You are an expert IT service desk analyst creating articles for a technical Knowledge Base.
 Analyze the provided ticket context carefully to extract the category, problem summary, and how it was handled.
@@ -47,22 +47,30 @@ Log Notes: {log_notes}
 ### Strict Guidelines:
 1. "category": MUST be chosen ONLY from the following predefined list:
 
-   **SAP Business One Categories**
-   - Financials
+   - Finance
    - Sales
    - Purchasing
    - Inventory
    - Production
-   - CRM
-   - System Administration
+   - Service
+   - Technical
+   - Procurement
+   - Manufacturing
+   - Asset Management
+   - Project Management
+   - Extensibility
+   - Integration
+   - CBC Configuration
+   - Authorization
+   - Configuration
+   - Transaction Error
+   - Master Data
    - Reporting
-
-   **SAP S/4HANA Public Cloud Categories**
-   - Finance (FI-AP, FI-AR, FI-GL)
-   - Procurement (MM-PUR)
-   - Logistics (LE-SHP)
-   - Ariba Integration (BNS-ARI)
-   - Technology (CA-GTF)
+   - Performance
+   - Enhancement Request
+   - Bug
+   - Training
+   - System Administration
 
 2. "summary": A clear 1–2 sentence description explaining the exact technical fault, error message, or user request.
 
