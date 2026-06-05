@@ -34,7 +34,7 @@ def process_single_ticket(index, row):
     elif not log_notes:
         log_notes = "Not provided."
 
-    # ENHANCED PROMPT: Tailored to capture root causes, workarounds, and actions taken
+    # ENHANCED PROMPT: Categories restricted to SAP B1 and S/4HANA Public Cloud
     prompt = f"""
 System: You are an expert IT service desk analyst creating articles for a technical Knowledge Base.
 Analyze the provided ticket context carefully to extract the category, problem summary, and how it was handled.
@@ -45,10 +45,29 @@ Description: {description}
 Log Notes: {log_notes}
 
 ### Strict Guidelines:
-1. "category": Exactly 1 to 2 words identifying the component or system (e.g., Server, Database, Infrastructure, Network, License).
-2. "summary": A clear 1-2 sentence description explaining the exact technical fault, error message, or user request.
+1. "category": MUST be chosen ONLY from the following predefined list:
+
+   **SAP Business One Categories**
+   - Financials
+   - Sales
+   - Purchasing
+   - Inventory
+   - Production
+   - CRM
+   - System Administration
+   - Reporting
+
+   **SAP S/4HANA Public Cloud Categories**
+   - Finance (FI-AP, FI-AR, FI-GL)
+   - Procurement (MM-PUR)
+   - Logistics (LE-SHP)
+   - Ariba Integration (BNS-ARI)
+   - Technology (CA-GTF)
+
+2. "summary": A clear 1–2 sentence description explaining the exact technical fault, error message, or user request.
+
 3. "resolution": Summarize the actions taken to fix the issue, the root cause identified, or the advice/workaround provided to the customer as found in the Log Notes or Description. 
-   - Be specific (e.g., mention specific errors, IP conflicts, or steps taken if present).
+   - Be specific (mention errors, conflicts, or steps taken if present).
    - If the log notes state that a fix was verified, or if troubleshooting details are present, synthesize them into a concise resolution statement.
    - ONLY use "No explicit resolution found in ticket logs" if the text is completely blank or offers zero context on what happened.
 
@@ -66,7 +85,7 @@ Output strictly in JSON format matching this schema:
         "stream": False,
         "format": "json",
         "options": {
-            "temperature": 0.1 # Bumped slightly from 0.0 to enable logical synthesis of log records
+            "temperature": 0.1
         }
     }
 
@@ -149,3 +168,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
