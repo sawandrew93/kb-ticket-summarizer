@@ -5,13 +5,12 @@ import re
 import time
 import argparse
 import os
-import certifi  # Ensures secure, trusted SSL connection
-import os
+import certifi
+import logging
 from dotenv import load_dotenv
 
 # Load variables from .env file
 load_dotenv()
-
 
 # --- CONFIGURATION ---
 OLLAMA_API = os.getenv("OLLAMA_API")
@@ -19,6 +18,17 @@ API_KEY = os.getenv("API_KEY")
 MODEL = os.getenv("MODEL")
 TIMEOUT_SECONDS = 180
 MAX_RETRIES = 3
+
+# --- LOGGING SETUP ---
+# This configures logging to write to both the console AND a file named "processing.log"
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s [%(levelname)s] %(message)s',
+    handlers=[
+        logging.FileHandler("processing.log"),
+        logging.StreamHandler()
+    ]
+)
 
 def clean_input_text(text):
     if pd.isna(text):
@@ -34,7 +44,7 @@ def process_single_ticket(index, row, session):
     log_notes = clean_input_text(row.get('Log Notes', ''))
 
     if not description and not log_notes:
-        print(f"[INFO] Ticket {ticket_number} has blank Description/Log Notes. Processing using Ticket Name...")
+        logging.info(f"Ticket {ticket_number} has blank Description/Log Notes. Processing using Ticket Name...")
         description = "Not provided."
         log_notes = "Not provided."
     elif not description:
@@ -42,7 +52,6 @@ def process_single_ticket(index, row, session):
     elif not log_notes:
         log_notes = "Not provided."
 
-    # ENHANCED PROMPT: Categories restricted to approved list
     prompt = f"""
 System: You are an expert IT service desk analyst creating articles for a technical Knowledge Base.
 Analyze the provided ticket context carefully to extract the category, problem summary, and how it was handled.
@@ -100,7 +109,8 @@ Output strictly in JSON format matching this schema:
         "stream": False,
         "format": "json",
         "options": {
-            "temperature": 0.1
+            "temperature": 0.1,
+            "num_thread": 21 # Matching your 24-core VM configuration
         }
     }
 
@@ -111,7 +121,6 @@ Output strictly in JSON format matching this schema:
 
     for attempt in range(MAX_RETRIES):
         try:
-            # Reusing the session connection here dramatically speeds up sequential requests
             response = session.post(OLLAMA_API, json=payload, headers=headers, timeout=TIMEOUT_SECONDS)
             response.raise_for_status()
             raw_output = response.json().get('response', '').strip()
@@ -122,18 +131,13 @@ Output strictly in JSON format matching this schema:
                 summary = parsed_data.get("summary", "No summary")
                 resolution = parsed_data.get("resolution", "No explicit resolution found in ticket logs.")
             except json.JSONDecodeError:
-                print(f"[WARNING] Ticket #{ticket_number}: Failed to parse JSON. Falling back to defaults.")
+                logging.warning(f"Ticket #{ticket_number}: Failed to parse JSON. Falling back to defaults.")
                 category, summary, resolution = "General", "No summary", "Parse Error"
 
             summary_with_ticket = f"[{ticket_number}] {summary}"
             wp_content = f"<p><strong>Issue Summary:</strong> {summary_with_ticket}</p>\n\n<p><strong>Resolution / Workaround:</strong> {resolution}</p>"
 
-            print("\n" + "="*50)
-            print(f"[SUCCESS] Ticket {ticket_number}: {ticket_name}")
-            print(f" -> CATEGORY: {category}")
-            print(f" -> SUMMARY: {summary_with_ticket}")
-            print(f" -> RESOLUTION: {resolution}")
-            print("="*50 + "\n")
+            logging.info(f"SUCCESS - Ticket {ticket_number}: {ticket_name} | Cat: {category}")
 
             return {
                 "ticket_number": ticket_number,
@@ -143,15 +147,15 @@ Output strictly in JSON format matching this schema:
             }
 
         except requests.exceptions.Timeout:
-            print(f"[WARNING] Ticket {ticket_number} timed out. Attempt {attempt + 1} of {MAX_RETRIES}.")
+            logging.warning(f"Ticket {ticket_number} timed out. Attempt {attempt + 1} of {MAX_RETRIES}.")
             if attempt < MAX_RETRIES - 1:
                 time.sleep(2)
             else:
-                print(f"[ERROR] Ticket {ticket_number} completely failed after {MAX_RETRIES} timeouts.")
+                logging.error(f"Ticket {ticket_number} completely failed after {MAX_RETRIES} timeouts.")
                 return None
 
         except Exception as e:
-            print(f"[ERROR] Ticket {ticket_number} failed with an unexpected error: {e}")
+            logging.error(f"Ticket {ticket_number} failed with an unexpected error: {e}")
             return None
 
 def main():
@@ -162,35 +166,45 @@ def main():
     input_file = args.input_file
     output_csv = f"kb_import_{os.path.basename(input_file)}"
 
-    print(f"Reading {input_file}...")
+    logging.info(f"Reading input file: {input_file}...")
     try:
         df = pd.read_csv(input_file)
     except FileNotFoundError:
-        print(f"Error: Could not find {input_file}")
+        logging.error(f"Could not find {input_file}")
         return
 
-    results = []
     total_tickets = len(df)
+    processed_count = 0
 
-    print(f"Starting optimized sequential processing for {total_tickets} tickets over HTTPS...")
+    # Initialize the output CSV with headers so we can append to it cleanly
+    empty_df = pd.DataFrame(columns=["ticket_number", "post_title", "post_content", "post_category"])
+    empty_df.to_csv(output_csv, index=False, encoding='utf-8')
 
-    # Establish an HTTP session context manager to keep the connection alive
+    logging.info(f"Starting optimized sequential processing for {total_tickets} tickets over HTTPS...")
+    logging.info(f"Output will be saved incrementally to: {output_csv}")
+
+    # Establish an HTTP session context manager
     with requests.Session() as session:
-        # Enforce SSL validation globally across the session using certifi
         session.verify = certifi.where()
 
-        for index, row in df.iterrows():
-            print(f"Processing ticket {index + 1} of {total_tickets}...")
-            res = process_single_ticket(index, row, session)
-            if res:
-                results.append(res)
+        try:
+            for index, row in df.iterrows():
+                logging.info(f"Processing ticket {index + 1} of {total_tickets}...")
+                res = process_single_ticket(index, row, session)
+                
+                if res:
+                    # APPEND TO CSV IMMEDIATELY:
+                    # If it crashes right after this, the data is already saved.
+                    pd.DataFrame([res]).to_csv(output_csv, mode='a', header=False, index=False, encoding='utf-8')
+                    processed_count += 1
+                    
+        except KeyboardInterrupt:
+            # Catch Ctrl+C and exit cleanly
+            logging.warning("Process interrupted by user (Ctrl+C). Halting execution.")
+            logging.info(f"Graceful Shutdown: {processed_count} tickets were successfully saved to {output_csv}.")
+            return
 
-    if results:
-        output_df = pd.DataFrame(results)
-        output_df.to_csv(output_csv, index=False, encoding='utf-8')
-        print(f"\nProcessing Complete! Saved {len(output_df)} formatted records inside '{output_csv}'.")
-    else:
-        print("\nNo records were processed successfully.")
+    logging.info(f"Processing Complete! Successfully processed and saved {processed_count} out of {total_tickets} records.")
 
 if __name__ == "__main__":
     main()
