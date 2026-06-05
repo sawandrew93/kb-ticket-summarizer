@@ -19,6 +19,10 @@ def clean_html(raw_html):
     text = re.sub(clean, '', raw_html or '')
     return html.unescape(text)
 
+# --- SANITIZE NAME FOR FILENAME ---
+def sanitize_name(name):
+    return re.sub(r'[^A-Za-z0-9_-]', '_', name.strip())
+
 # --- AUTHENTICATION ---
 common = xmlrpc.client.ServerProxy(f"{url}/xmlrpc/2/common")
 uid = common.authenticate(db, email, password, {})
@@ -60,7 +64,8 @@ if choice == "1":
         print(f"{u['id']} - {u['name']}")
     assignee_id = int(input("Enter Assignee ID: "))
     domain = [('user_id', '=', assignee_id)]
-    filename = "tickets_assignee.csv"
+    assignee_name = next((u['name'] for u in users if u['id'] == assignee_id), f"id{assignee_id}")
+    filename = f"tickets_assignee_{sanitize_name(assignee_name)}.csv"
 
 elif choice == "2":
     print("\nAvailable Assignees:")
@@ -74,7 +79,8 @@ elif choice == "2":
         ('create_date', '>=', start_date),
         ('create_date', '<=', end_date)
     ]
-    filename = "tickets_assignee_date.csv"
+    assignee_name = next((u['name'] for u in users if u['id'] == assignee_id), f"id{assignee_id}")
+    filename = f"tickets_assignee_{sanitize_name(assignee_name)}_{start_date}_to_{end_date}.csv"
 
 elif choice == "3":
     print("\nAvailable Helpdesk Teams:")
@@ -82,7 +88,8 @@ elif choice == "3":
         print(f"{t['id']} - {t['name']}")
     team_id = int(input("Enter Helpdesk Team ID: "))
     domain = [('team_id', '=', team_id)]
-    filename = "tickets_team.csv"
+    team_name = next((t['name'] for t in teams if t['id'] == team_id), f"id{team_id}")
+    filename = f"tickets_team_{sanitize_name(team_name)}.csv"
 
 elif choice == "4":
     print("\nAvailable Helpdesk Teams:")
@@ -96,7 +103,8 @@ elif choice == "4":
         ('create_date', '>=', start_date),
         ('create_date', '<=', end_date)
     ]
-    filename = "tickets_team_date.csv"
+    team_name = next((t['name'] for t in teams if t['id'] == team_id), f"id{team_id}")
+    filename = f"tickets_team_{sanitize_name(team_name)}_{start_date}_to_{end_date}.csv"
 
 else:
     print("Invalid choice. Exiting.")
