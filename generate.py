@@ -7,6 +7,7 @@ import argparse
 import os
 import certifi
 import logging
+import sys
 from dotenv import load_dotenv
 
 # Load variables from .env file
@@ -20,7 +21,6 @@ TIMEOUT_SECONDS = 180
 MAX_RETRIES = 3
 
 # --- LOGGING SETUP ---
-# This configures logging to write to both the console AND a file named "processing.log"
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s [%(levelname)s] %(message)s',
@@ -146,16 +146,19 @@ Output strictly in JSON format matching this schema:
                 "post_category": category
             }
 
-        except requests.exceptions.Timeout:
-            logging.warning(f"Ticket {ticket_number} timed out. Attempt {attempt + 1} of {MAX_RETRIES}.")
+        # Catch ALL network errors (Timeouts, Connection Refused, No Route to Host)
+        except requests.exceptions.RequestException as e:
+            logging.warning(f"Network error on Ticket {ticket_number}. Attempt {attempt + 1} of {MAX_RETRIES}. Error: {e}")
             if attempt < MAX_RETRIES - 1:
-                time.sleep(2)
+                time.sleep(5) # Give the server a slightly longer 5-second breather before retrying
             else:
-                logging.error(f"Ticket {ticket_number} completely failed after {MAX_RETRIES} timeouts.")
-                return None
+                logging.error(f"FATAL: Ticket {ticket_number} completely failed after {MAX_RETRIES} attempts.")
+                # This triggers the circuit breaker, stopping the script entirely
+                raise SystemExit(f"Halting execution due to critical network failure: {e}")
 
         except Exception as e:
-            logging.error(f"Ticket {ticket_number} failed with an unexpected error: {e}")
+            # Catch strictly non-network related coding/system errors
+            logging.error(f"Ticket {ticket_number} failed with an unexpected coding error: {e}")
             return None
 
 def main():
@@ -175,36 +178,58 @@ def main():
 
     total_tickets = len(df)
     processed_count = 0
+    processed_tickets = set()
 
-    # Initialize the output CSV with headers so we can append to it cleanly
-    empty_df = pd.DataFrame(columns=["ticket_number", "post_title", "post_content", "post_category"])
-    empty_df.to_csv(output_csv, index=False, encoding='utf-8')
+    # --- RESUME LOGIC ---
+    if os.path.exists(output_csv):
+        logging.info(f"Existing output file found at '{output_csv}'. Checking for completed tickets...")
+        try:
+            existing_df = pd.read_csv(output_csv)
+            if 'ticket_number' in existing_df.columns:
+                # Store previously processed ticket numbers in a fast-lookup set
+                processed_tickets = set(existing_df['ticket_number'].astype(str))
+                logging.info(f"Found {len(processed_tickets)} already processed tickets. Resuming progress...")
+        except Exception as e:
+            logging.warning(f"Could not read existing file to resume progress: {e}")
+    else:
+        # File doesn't exist, initialize it with headers
+        empty_df = pd.DataFrame(columns=["ticket_number", "post_title", "post_content", "post_category"])
+        empty_df.to_csv(output_csv, index=False, encoding='utf-8')
+        logging.info(f"Created new output file: {output_csv}")
 
     logging.info(f"Starting optimized sequential processing for {total_tickets} tickets over HTTPS...")
-    logging.info(f"Output will be saved incrementally to: {output_csv}")
 
-    # Establish an HTTP session context manager
     with requests.Session() as session:
         session.verify = certifi.where()
 
         try:
             for index, row in df.iterrows():
+                # Extract the ticket number purely to check if we should skip it
+                raw_ticket = row.get('Ticket Number', f'TKT-{index}')
+                ticket_number = clean_input_text(raw_ticket)
+
+                # If we've already done this one, skip the Ollama call entirely
+                if ticket_number in processed_tickets:
+                    logging.info(f"Skipping Ticket {ticket_number} (Already Processed).")
+                    continue
+
                 logging.info(f"Processing ticket {index + 1} of {total_tickets}...")
                 res = process_single_ticket(index, row, session)
                 
                 if res:
-                    # APPEND TO CSV IMMEDIATELY:
-                    # If it crashes right after this, the data is already saved.
                     pd.DataFrame([res]).to_csv(output_csv, mode='a', header=False, index=False, encoding='utf-8')
                     processed_count += 1
                     
         except KeyboardInterrupt:
-            # Catch Ctrl+C and exit cleanly
             logging.warning("Process interrupted by user (Ctrl+C). Halting execution.")
-            logging.info(f"Graceful Shutdown: {processed_count} tickets were successfully saved to {output_csv}.")
-            return
+            logging.info(f"Graceful Shutdown: Processed {processed_count} new tickets.")
+            sys.exit(0)
+        except SystemExit as e:
+            # Caught the circuit breaker shutdown from the process_single_ticket function
+            logging.error(f"Script aborted automatically to protect data. Reason: {e}")
+            sys.exit(1)
 
-    logging.info(f"Processing Complete! Successfully processed and saved {processed_count} out of {total_tickets} records.")
+    logging.info(f"Processing Complete! Successfully processed and saved {processed_count} new records.")
 
 if __name__ == "__main__":
     main()
