@@ -13,12 +13,9 @@ from dotenv import load_dotenv
 # Load variables from .env file
 load_dotenv()
 
-# --- CONFIGURATION ---
-OLLAMA_API = os.getenv("OLLAMA_API")
-API_KEY = os.getenv("API_KEY")
-MODEL = os.getenv("MODEL")
+# --- DEFAULT CONFIGURATION ---
 TIMEOUT_SECONDS = 180
-MAX_RETRIES = 3
+MAX_RETRIES = 5
 
 # --- LOGGING SETUP ---
 logging.basicConfig(
@@ -37,7 +34,7 @@ def clean_input_text(text):
     text = re.sub(r'\s+', ' ', text)
     return text.strip()
 
-def process_single_ticket(index, row, session):
+def process_single_ticket(index, row, session, config):
     ticket_number = clean_input_text(row.get('Ticket Number', f'TKT-{index}'))
     ticket_name = clean_input_text(row.get('Ticket Name', ''))
     description = clean_input_text(row.get('Description', ''))
@@ -62,38 +59,18 @@ Description: {description}
 Log Notes: {log_notes}
 
 ### Strict Guidelines:
-1. "category": MUST be chosen ONLY from the following predefined list:
+1. "category": MUST be chosen ONLY from the predefined list...
    - Finance
    - Sales
    - Purchasing
-   - Inventory
-   - Production
-   - Service
    - Technical
-   - Procurement
-   - Manufacturing
-   - Asset Management
-   - Project Management
-   - Extensibility
-   - Integration
-   - CBC Configuration
-   - Authorization
-   - Configuration
    - Transaction Error
-   - Master Data
-   - Reporting
-   - Performance
-   - Enhancement Request
-   - Bug
-   - Training
    - System Administration
+   (Add your full list back here)
 
 2. "summary": A clear 1–2 sentence description explaining the exact technical fault, error message, or user request.
 
-3. "resolution": Summarize the actions taken to fix the issue, the root cause identified, or the advice/workaround provided to the customer as found in the Log Notes or Description. 
-   - Be specific (mention errors, conflicts, or steps taken if present).
-   - If the log notes state that a fix was verified, or if troubleshooting details are present, synthesize them into a concise resolution statement.
-   - ONLY use "No explicit resolution found in ticket logs" if the text is completely blank or offers zero context on what happened.
+3. "resolution": Summarize the actions taken to fix the issue...
 
 Output strictly in JSON format matching this schema:
 {{
@@ -104,24 +81,26 @@ Output strictly in JSON format matching this schema:
 """
 
     payload = {
-        "model": MODEL,
+        "model": config["model"],
         "prompt": prompt,
         "stream": False,
         "format": "json",
         "options": {
             "temperature": 0.1,
-            "num_thread": 21 # Matching your 24-core VM configuration
+            # Removed hardcoded num_thread so local machines don't get restricted
+            # Add it back here if you specifically want to throttle your local desktop
         }
-    }
-
-    headers = {
-        "X-API-Key": API_KEY,
-        "Content-Type": "application/json"
     }
 
     for attempt in range(MAX_RETRIES):
         try:
-            response = session.post(OLLAMA_API, json=payload, headers=headers, timeout=TIMEOUT_SECONDS)
+            # Using the dynamic URL and Headers from our config dictionary
+            response = session.post(
+                config["url"], 
+                json=payload, 
+                headers=config["headers"], 
+                timeout=TIMEOUT_SECONDS
+            )
             response.raise_for_status()
             raw_output = response.json().get('response', '').strip()
 
@@ -146,28 +125,66 @@ Output strictly in JSON format matching this schema:
                 "post_category": category
             }
 
-        # Catch ALL network errors (Timeouts, Connection Refused, No Route to Host)
         except requests.exceptions.RequestException as e:
             logging.warning(f"Network error on Ticket {ticket_number}. Attempt {attempt + 1} of {MAX_RETRIES}. Error: {e}")
             if attempt < MAX_RETRIES - 1:
-                time.sleep(5) # Give the server a slightly longer 5-second breather before retrying
+                time.sleep(5)
             else:
                 logging.error(f"FATAL: Ticket {ticket_number} completely failed after {MAX_RETRIES} attempts.")
-                # This triggers the circuit breaker, stopping the script entirely
                 raise SystemExit(f"Halting execution due to critical network failure: {e}")
 
         except Exception as e:
-            # Catch strictly non-network related coding/system errors
             logging.error(f"Ticket {ticket_number} failed with an unexpected coding error: {e}")
             return None
 
 def main():
     parser = argparse.ArgumentParser(description="Process helpdesk tickets with Ollama.")
     parser.add_argument("input_file", help="CSV file containing tickets")
+    # Added optional flag for automation
+    parser.add_argument("--mode", choices=['remote', 'local'], help="Bypass interactive prompt for automation")
     args = parser.parse_args()
 
     input_file = args.input_file
     output_csv = f"kb_import_{os.path.basename(input_file)}"
+
+    # --- ENVIRONMENT SELECTOR ---
+    mode = args.mode
+    if not mode:
+        print("\n--- Select Processing Environment ---")
+        print("1. Remote Secure Server (HTTPS + Nginx API Key)")
+        print("2. Local Default Server (HTTP 127.0.0.1:11434 - No SSL)")
+        
+        while True:
+            choice = input("\nEnter 1 or 2: ").strip()
+            if choice == '1':
+                mode = 'remote'
+                break
+            elif choice == '2':
+                mode = 'local'
+                break
+            else:
+                print("Invalid choice. Please enter 1 or 2.")
+
+    # Configure connection variables dynamically
+    if mode == 'remote':
+        logging.info("Initializing REMOTE environment...")
+        config = {
+            "url": os.getenv("OLLAMA_API"),
+            "model": os.getenv("MODEL"),
+            "headers": {
+                "X-API-Key": os.getenv("API_KEY"),
+                "Content-Type": "application/json"
+            },
+            "verify_ssl": certifi.where()
+        }
+    else:
+        logging.info("Initializing LOCAL environment...")
+        config = {
+            "url": "http://127.0.0.1:11434/api/generate",
+            "model": os.getenv("MODEL", "llama3"), # Fallback to llama3 if not in env
+            "headers": {"Content-Type": "application/json"},
+            "verify_ssl": False # Bypass SSL checking for localhost
+        }
 
     logging.info(f"Reading input file: {input_file}...")
     try:
@@ -186,35 +203,30 @@ def main():
         try:
             existing_df = pd.read_csv(output_csv)
             if 'ticket_number' in existing_df.columns:
-                # Store previously processed ticket numbers in a fast-lookup set
                 processed_tickets = set(existing_df['ticket_number'].astype(str))
                 logging.info(f"Found {len(processed_tickets)} already processed tickets. Resuming progress...")
         except Exception as e:
             logging.warning(f"Could not read existing file to resume progress: {e}")
     else:
-        # File doesn't exist, initialize it with headers
         empty_df = pd.DataFrame(columns=["ticket_number", "post_title", "post_content", "post_category"])
         empty_df.to_csv(output_csv, index=False, encoding='utf-8')
-        logging.info(f"Created new output file: {output_csv}")
 
-    logging.info(f"Starting optimized sequential processing for {total_tickets} tickets over HTTPS...")
+    logging.info(f"Starting processing for {total_tickets} tickets...")
 
     with requests.Session() as session:
-        session.verify = certifi.where()
+        # Apply SSL rules dynamically based on the chosen environment
+        session.verify = config["verify_ssl"]
 
         try:
             for index, row in df.iterrows():
-                # Extract the ticket number purely to check if we should skip it
                 raw_ticket = row.get('Ticket Number', f'TKT-{index}')
                 ticket_number = clean_input_text(raw_ticket)
 
-                # If we've already done this one, skip the Ollama call entirely
                 if ticket_number in processed_tickets:
-                    logging.info(f"Skipping Ticket {ticket_number} (Already Processed).")
                     continue
 
                 logging.info(f"Processing ticket {index + 1} of {total_tickets}...")
-                res = process_single_ticket(index, row, session)
+                res = process_single_ticket(index, row, session, config)
                 
                 if res:
                     pd.DataFrame([res]).to_csv(output_csv, mode='a', header=False, index=False, encoding='utf-8')
@@ -222,10 +234,8 @@ def main():
                     
         except KeyboardInterrupt:
             logging.warning("Process interrupted by user (Ctrl+C). Halting execution.")
-            logging.info(f"Graceful Shutdown: Processed {processed_count} new tickets.")
             sys.exit(0)
         except SystemExit as e:
-            # Caught the circuit breaker shutdown from the process_single_ticket function
             logging.error(f"Script aborted automatically to protect data. Reason: {e}")
             sys.exit(1)
 
