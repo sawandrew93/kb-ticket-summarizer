@@ -14,8 +14,9 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # --- DEFAULT CONFIGURATION ---
-TIMEOUT_SECONDS = 180
-MAX_RETRIES = 5
+TIMEOUT_SECONDS = 240 
+MAX_RETRIES = 3 
+MAX_CHARS = 4000 # Limit input text to prevent the AI from choking
 
 # --- LOGGING SETUP ---
 logging.basicConfig(
@@ -32,7 +33,12 @@ def clean_input_text(text):
         return ""
     text = re.sub(r'&\w+;| |\n|\r', ' ', str(text))
     text = re.sub(r'\s+', ' ', text)
-    return text.strip()
+    text = text.strip()
+    
+    # TRUNCATION LOGIC: Cut off massive logs so the AI doesn't choke
+    if len(text) > MAX_CHARS:
+        text = text[:MAX_CHARS] + "... [TRUNCATED BY SCRIPT DUE TO LENGTH]"
+    return text
 
 def process_single_ticket(index, row, session, config):
     ticket_number = clean_input_text(row.get('Ticket Number', f'TKT-{index}'))
@@ -59,18 +65,38 @@ Description: {description}
 Log Notes: {log_notes}
 
 ### Strict Guidelines:
-1. "category": MUST be chosen ONLY from the predefined list...
+1. "category": MUST be chosen ONLY from the following predefined list:
    - Finance
    - Sales
    - Purchasing
+   - Inventory
+   - Production
+   - Service
    - Technical
+   - Procurement
+   - Manufacturing
+   - Asset Management
+   - Project Management
+   - Extensibility
+   - Integration
+   - CBC Configuration
+   - Authorization
+   - Configuration
    - Transaction Error
+   - Master Data
+   - Reporting
+   - Performance
+   - Enhancement Request
+   - Bug
+   - Training
    - System Administration
-   (Add your full list back here)
 
 2. "summary": A clear 1–2 sentence description explaining the exact technical fault, error message, or user request.
 
-3. "resolution": Summarize the actions taken to fix the issue...
+3. "resolution": Summarize the actions taken to fix the issue, the root cause identified, or the advice/workaround provided to the customer as found in the Log Notes or Description. 
+   - Be specific (mention errors, conflicts, or steps taken if present).
+   - If the log notes state that a fix was verified, or if troubleshooting details are present, synthesize them into a concise resolution statement.
+   - ONLY use "No explicit resolution found in ticket logs" if the text is completely blank or offers zero context on what happened.
 
 Output strictly in JSON format matching this schema:
 {{
@@ -87,14 +113,11 @@ Output strictly in JSON format matching this schema:
         "format": "json",
         "options": {
             "temperature": 0.1,
-            # Removed hardcoded num_thread so local machines don't get restricted
-            # Add it back here if you specifically want to throttle your local desktop
         }
     }
 
     for attempt in range(MAX_RETRIES):
         try:
-            # Using the dynamic URL and Headers from our config dictionary
             response = session.post(
                 config["url"], 
                 json=payload, 
@@ -125,13 +148,33 @@ Output strictly in JSON format matching this schema:
                 "post_category": category
             }
 
-        except requests.exceptions.RequestException as e:
-            logging.warning(f"Network error on Ticket {ticket_number}. Attempt {attempt + 1} of {MAX_RETRIES}. Error: {e}")
+        # Handle purely TIMEOUT errors (Ticket is too hard/long)
+        except requests.exceptions.ReadTimeout as e:
+            logging.warning(f"Read Timeout on Ticket {ticket_number}. AI took too long. Attempt {attempt + 1} of {MAX_RETRIES}.")
+            if attempt == MAX_RETRIES - 1:
+                logging.error(f"Ticket {ticket_number} skipped due to persistent timeouts.")
+                # Return a failure record so it saves to CSV and is skipped next time
+                return {
+                    "ticket_number": ticket_number,
+                    "post_title": f"{ticket_number} - {ticket_name}",
+                    "post_content": "<p><strong>Error:</strong> Ticket skipped automatically. The logs were too complex or the AI timed out.</p>",
+                    "post_category": "System Administration"
+                }
+
+        # Handle physical CONNECTION errors (Server is offline / No Route to Host)
+        except requests.exceptions.ConnectionError as e:
+            logging.warning(f"Server connection lost on Ticket {ticket_number}. Attempt {attempt + 1} of {MAX_RETRIES}.")
             if attempt < MAX_RETRIES - 1:
-                time.sleep(5)
+                time.sleep(10)
             else:
-                logging.error(f"FATAL: Ticket {ticket_number} completely failed after {MAX_RETRIES} attempts.")
-                raise SystemExit(f"Halting execution due to critical network failure: {e}")
+                logging.error(f"FATAL: Ollama server is unreachable.")
+                raise SystemExit(f"Halting execution to protect data. Server is down: {e}")
+
+        # Handle any other request errors (e.g. 500 Internal Server Error)
+        except requests.exceptions.RequestException as e:
+            logging.warning(f"API Error on Ticket {ticket_number}: {e}")
+            if attempt == MAX_RETRIES - 1:
+                return None
 
         except Exception as e:
             logging.error(f"Ticket {ticket_number} failed with an unexpected coding error: {e}")
@@ -140,7 +183,6 @@ Output strictly in JSON format matching this schema:
 def main():
     parser = argparse.ArgumentParser(description="Process helpdesk tickets with Ollama.")
     parser.add_argument("input_file", help="CSV file containing tickets")
-    # Added optional flag for automation
     parser.add_argument("--mode", choices=['remote', 'local'], help="Bypass interactive prompt for automation")
     args = parser.parse_args()
 
@@ -165,7 +207,6 @@ def main():
             else:
                 print("Invalid choice. Please enter 1 or 2.")
 
-    # Configure connection variables dynamically
     if mode == 'remote':
         logging.info("Initializing REMOTE environment...")
         config = {
@@ -181,9 +222,9 @@ def main():
         logging.info("Initializing LOCAL environment...")
         config = {
             "url": "http://127.0.0.1:11434/api/generate",
-            "model": os.getenv("MODEL", "llama3"), # Fallback to llama3 if not in env
+            "model": os.getenv("MODEL", "llama3"),
             "headers": {"Content-Type": "application/json"},
-            "verify_ssl": False # Bypass SSL checking for localhost
+            "verify_ssl": False
         }
 
     logging.info(f"Reading input file: {input_file}...")
@@ -197,7 +238,6 @@ def main():
     processed_count = 0
     processed_tickets = set()
 
-    # --- RESUME LOGIC ---
     if os.path.exists(output_csv):
         logging.info(f"Existing output file found at '{output_csv}'. Checking for completed tickets...")
         try:
@@ -214,7 +254,6 @@ def main():
     logging.info(f"Starting processing for {total_tickets} tickets...")
 
     with requests.Session() as session:
-        # Apply SSL rules dynamically based on the chosen environment
         session.verify = config["verify_ssl"]
 
         try:
